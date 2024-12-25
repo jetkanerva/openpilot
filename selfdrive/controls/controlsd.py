@@ -18,7 +18,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.controls.lib.vehicle_model import VehicleModel
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-
+from autosteer.autosteer import Autosteer
 
 State = log.SelfdriveState.OpenpilotState
 LaneChangeState = log.LaneChangeState
@@ -55,6 +55,9 @@ class Controls:
       self.LaC = LatControlPID(self.CP, self.CI)
     elif self.CP.lateralTuning.which() == 'torque':
       self.LaC = LatControlTorque(self.CP, self.CI)
+
+    # Autosteer usage
+    self.Autosteer = Autosteer(self.sm, self.VM)
 
   def update(self):
     self.sm.update(15)
@@ -104,16 +107,24 @@ class Controls:
     if not CC.longActive:
       self.LoC.reset()
 
-    # accel PID loop
+    # accel PID loop and Steering PID loop and lateral MPC
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
-    actuators.accel = self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits)
+    accel = self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits)
 
-    # Steering PID loop and lateral MPC
     self.desired_curvature = clip_curvature(CS.vEgo, self.desired_curvature, model_v2.action.desiredCurvature)
-    actuators.curvature = self.desired_curvature
-    actuators.steer, actuators.steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,
+    steer, steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,
                                                                             self.steer_limited, self.desired_curvature,
                                                                             self.calibrated_pose) # TODO what if not available
+
+    # If Autosteer is active, use it instead of the model_v2 to control the car
+    if self.Autosteer.is_active:
+      actuators.accel = self.Autosteer.get_acceleration(max_acceleration=accel)
+      actuators.curvature, actuators.steer, actuators.steeringAngleDeg = self.Autosteer.get_steering()
+
+    else:
+      actuators.accel = accel
+      actuators.curvature = self.desired_curvature
+      actuators.steer, actuators.steeringAngleDeg = steer, steeringAngleDeg
 
     # Ensure no NaNs/Infs
     for p in ACTUATOR_FIELDS:
